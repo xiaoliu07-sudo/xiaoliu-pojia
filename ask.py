@@ -13,9 +13,19 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 
 CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
 
-# 破甲提示词 — 自动读取你部署的增强版 v42
+# 破甲提示词 — 优先读 config.toml 里 model_instructions_file 指向的文件
+# (deploy.py 部署后是 ctf-sandbox.md; 手动配置可能是 gpt5.6-sol-unrestricted-enhanced.md)
 def load_jailbreak():
-    for name in ["gpt-5.6-sol-unrestricted-v42.md", "unchained.md"]:
+    cfg_file = CODEX_HOME / "config.toml"
+    if cfg_file.exists():
+        m = re.search(r'^\s*model_instructions_file\s*=\s*["\']?([^"\'\s#]+)["\']?',
+                      cfg_file.read_text(encoding="utf-8"), re.MULTILINE)
+        if m:
+            f = CODEX_HOME / m.group(1).lstrip("./")
+            if f.exists():
+                return f.read_text(encoding="utf-8")
+    for name in ["ctf-sandbox.md", "gpt5.6-sol-unrestricted-enhanced.md",
+                 "gpt-5.6-sol-unrestricted-v42.md", "gpt5.5-unrestricted.md", "unchained.md"]:
         f = CODEX_HOME / name
         if f.exists():
             return f.read_text(encoding="utf-8")
@@ -32,6 +42,10 @@ def discover():
             m = re.search(rf'^{key}\s*=\s*["\']?(.+?)["\']?\s*$', text, re.MULTILINE)
             if m:
                 cfg[key] = m.group(1).strip('"\'')
+        # wire_api 声明在 [model_providers.xxx] 段里,决定用 /v1/responses 还是 /v1/chat/completions
+        m = re.search(r'wire_api\s*=\s*["\']([^"\']+)["\']', text)
+        if m:
+            cfg["wire_api"] = m.group(1)
     token = None
     if auth_file.exists():
         data = json.loads(auth_file.read_text(encoding="utf-8"))
@@ -44,25 +58,37 @@ def discover():
                 if isinstance(v, str) and len(v) > 20:
                     token = v
                     break
-    return cfg.get("base_url", "https://api.openai.com"), cfg.get("model", "gpt-5.6-sol"), token
+    return (cfg.get("base_url", "https://api.openai.com"),
+            cfg.get("model", "gpt-5.6-sol"),
+            cfg.get("wire_api", "chat_completions"),
+            token)
 
 
 def ask(prompt):
-    base, model, token = discover()
+    base, model, wire_api, token = discover()
     if not token:
         print("[错误] 未找到 API token", file=sys.stderr)
         sys.exit(1)
 
     jailbreak = load_jailbreak()
-    endpoint = f"{base.rstrip('/')}/v1/chat/completions"
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": jailbreak},
-            {"role": "user", "content": prompt},
-        ],
-        "stream": True,
-    }
+    if wire_api == "responses":
+        endpoint = f"{base.rstrip('/')}/v1/responses"
+        body = {
+            "model": model,
+            "input": prompt,
+            "instructions": jailbreak,
+            "stream": True,
+        }
+    else:
+        endpoint = f"{base.rstrip('/')}/v1/chat/completions"
+        body = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": jailbreak},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": True,
+        }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, encoding="utf-8") as f:
         json.dump(body, f, ensure_ascii=False)
@@ -84,7 +110,11 @@ def ask(prompt):
                     break
                 try:
                     d = json.loads(chunk)
-                    c = d.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                    c = ""
+                    if "choices" in d:  # chat/completions 流
+                        c = d["choices"][0].get("delta", {}).get("content", "")
+                    elif d.get("type") == "response.output_text.delta":  # responses 流
+                        c = d.get("delta", "")
                     if c:
                         sys.stdout.write(c)
                         sys.stdout.flush()

@@ -429,7 +429,7 @@ def deploy(codex_dir, dry_run=False):
         "model_instructions_file": f'"{PROMPT_FILENAME}"',
         "sandbox_mode": "'danger-full-access'",
         "approval_policy": "'never'",
-        "model_reasoning_effort": '"xhigh"',
+        "model_reasoning_effort": '"max"',
         "disable_response_storage": "true",
         "network_access": '"enabled"',
     }
